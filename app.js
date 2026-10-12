@@ -16180,9 +16180,19 @@ async function showSyncStatus() {
     nowBtn.onclick = async () => {
       nowBtn.disabled = true;
       nowBtn.textContent = t('Syncing…');
-      await window.neo.syncNow();
+      if (book) {
+        flushAllSaves();
+        const chains = Object.values(chapterChain);
+        if (chains.length) await Promise.allSettled(chains);
+      }
+      const r = await window.neo.syncNow();
       bg.remove();
-      toast(t('Sync complete'));
+      if (r && !r.error) {
+        toast(t('Sync complete'));
+        if (book) refreshFromDisk();
+      } else {
+        toast(r && r.error ? r.error : t('Sync failed'));
+      }
     };
   }
 }
@@ -16295,11 +16305,22 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'syncConnect') showSyncConnect();
   if (msg.type === 'syncNow') {
     updateSyncIndicator('syncing');
-    if (book) flushAllSaves();
-    window.neo.syncNow().then((r) => {
+    (async () => {
+      if (book) {
+        flushAllSaves();
+        // flushAllSaves fires persistChapter as microtasks — the IPC calls
+        // haven't been sent yet.  Await every chain so the chapter files are
+        // on disk before the sync engine reads them.
+        const chains = Object.values(chapterChain);
+        if (chains.length) await Promise.allSettled(chains);
+      }
+      const r = await window.neo.syncNow();
       updateSyncIndicator(r.error ? 'error' : 'synced', r.error || '');
-      if (!r.error) toast(t('Sync complete'));
-    });
+      if (!r.error) {
+        toast(t('Sync complete'));
+        if (book) refreshFromDisk();
+      }
+    })();
   }
   if (msg.type === 'syncStatusDialog') showSyncStatus();
   if (msg.type === 'syncChangePassword') showSyncChangePassword();

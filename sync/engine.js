@@ -186,7 +186,7 @@ function flushPushDebounce() {
 }
 
 async function syncPush() {
-  if (!isReady() || _syncInProgress || _pushQueue.size === 0) return;
+  if (!isReady() || _syncInProgress || _pushQueue.size === 0) return { pushed: 0, queued: 0 };
   _syncInProgress = true;
   status('syncing');
 
@@ -199,6 +199,7 @@ async function syncPush() {
     // Snapshot the queue
     const items = [..._pushQueue.entries()];
     _pushQueue.clear();
+    let pushed = 0;
 
     // Read current manifest from Drive
     let manifest = await fetchRemoteManifest(mfk);
@@ -278,6 +279,7 @@ async function syncPush() {
 
           State.markSynced(state, objectId, rel, hash, objectVersion);
           manifestChanged = true;
+          pushed++;
         } catch (err) {
           // Re-enqueue on failure so it retries
           _pushQueue.set(rel, Date.now());
@@ -297,6 +299,7 @@ async function syncPush() {
     state.lastSyncAt = new Date().toISOString();
     State.writeState(state);
     status(_pushQueue.size > 0 ? 'syncing' : 'synced');
+    return { pushed, queued: items.length };
   } finally {
     _syncInProgress = false;
   }
@@ -462,10 +465,14 @@ async function syncPull() {
 // (e.g. a merged library.json).
 async function syncAll() {
   flushPushDebounce();
-  await syncPush();
+  const push1 = await syncPush() || { pushed: 0, queued: 0 };
   const pullResult = await syncPull();
-  await syncPush();
-  return pullResult;
+  const push2 = await syncPush() || { pushed: 0, queued: 0 };
+  return {
+    ...pullResult,
+    pushed: push1.pushed + push2.pushed,
+    queued: push1.queued + push2.queued
+  };
 }
 
 // ---------------------------------------------------------------------------
