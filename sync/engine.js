@@ -203,6 +203,21 @@ async function syncPush() {
           const abs = path.join(_libraryDir, rel);
           if (!fs.existsSync(abs)) return; // file deleted between queue and push
 
+          // library.json: merge with remote before pushing so neither side overwrites the other
+          if (rel === 'library.json') {
+            const remoteEntry = Manifest.findByPath(manifest, 'library.json');
+            if (remoteEntry) {
+              try {
+                const remotePlaintext = await downloadAndDecrypt(
+                  remoteEntry.objectId, remoteEntry.objectVersion, ck
+                );
+                if (remotePlaintext) mergeLibraryJson(abs, remotePlaintext, _libraryDir);
+              } catch (_err) {
+                if (_logError) _logError('sync push library merge', _err);
+              }
+            }
+          }
+
           const data = fs.readFileSync(abs);
           const hash = SC.contentHash(data);
           const objectId = SC.deriveObjectId(fk, rel);
@@ -283,6 +298,17 @@ async function syncPull() {
 
           // Check for conflict: local file also changed since last sync
           if (mayConflict) {
+            // library.json is always merged, never conflicted
+            if (rel === 'library.json') {
+              const plaintext = await downloadAndDecrypt(objectId, remote.objectVersion, ck);
+              if (plaintext) {
+                mergeLibraryJson(abs, plaintext, _libraryDir);
+                const mergedHash = localFileHash(abs);
+                State.markSynced(state, objectId, rel, mergedHash || remote.contentHash, remote.objectVersion);
+                downloaded++;
+              }
+              return;
+            }
             const localHash = localFileHash(abs);
             const prev = State.getObjectState(state, objectId);
             if (localHash && prev && localHash !== prev.lastSyncedHash && remote.contentHash !== prev.lastSyncedHash) {
@@ -343,6 +369,11 @@ async function syncPull() {
         if (_logError) _logError('sync tombstone', err);
       }
     }
+
+    // Safety net: ensure every book folder on disk is on a shelf, even if
+    // library.json was not in this download batch (e.g. it was synced before
+    // the merge code existed, or only book folders were pulled this time).
+    if (ensureBooksAreShelved(_libraryDir)) downloaded++;
 
     state.lastSyncAt = new Date().toISOString();
     state.lastManifestVersion = manifest.manifestVersion;
@@ -498,6 +529,29 @@ function listBookFoldersOnDisk(libraryDir) {
     }
   } catch { /* empty library */ }
   return ids;
+}
+
+function ensureBooksAreShelved(libraryDir) {
+  const absPath = path.join(libraryDir, 'library.json');
+  let lib;
+  try { lib = JSON.parse(fs.readFileSync(absPath, 'utf8')); } catch { return false; }
+
+  const shelves = Array.isArray(lib.shelves) ? lib.shelves : [];
+  const allOnDisk = listBookFoldersOnDisk(libraryDir);
+  const shelvedSet = new Set(shelves.flatMap((s) => s.bookIds || []));
+  const unshelved = allOnDisk.filter((id) => !shelvedSet.has(id));
+
+  if (unshelved.length === 0) return false;
+
+  if (shelves.length > 0) {
+    for (const id of unshelved) shelves[0].bookIds.push(id);
+  } else {
+    shelves.push({ id: 's-' + Date.now().toString(36), name: 'Shelf', bookIds: unshelved });
+    lib.shelves = shelves;
+  }
+
+  writeFileDurable(absPath, JSON.stringify(lib, null, 2));
+  return true;
 }
 
 function mergeLibraryJson(absPath, remoteBuffer, libraryDir) {
@@ -666,6 +720,7 @@ module.exports = {
   shouldSync,
   bookIdFromPath,
   mergeLibraryJson,
+  ensureBooksAreShelved,
   listBookFoldersOnDisk,
   DEVICE_LOOK
 };

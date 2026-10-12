@@ -757,3 +757,78 @@ describe('mergeLibraryJson', () => {
     assert.equal(merged.authorName, 'Alice');
   });
 });
+
+// ---------------------------------------------------------------------------
+// ensureBooksAreShelved — safety net that runs after every pull
+// ---------------------------------------------------------------------------
+
+describe('ensureBooksAreShelved', () => {
+  let tmpDir, libDir;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-shelve-'));
+    libDir = path.join(tmpDir, 'Library');
+    fs.mkdirSync(libDir, { recursive: true });
+  });
+
+  function writeLib(obj) {
+    fs.writeFileSync(path.join(libDir, 'library.json'), JSON.stringify(obj, null, 2));
+  }
+  function readLib() {
+    return JSON.parse(fs.readFileSync(path.join(libDir, 'library.json'), 'utf8'));
+  }
+  function makeBook(id) {
+    const dir = path.join(libDir, id, 'chapters');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'ch-1.html'), '<p>text</p>');
+  }
+
+  it('adds unshelved book folders to the first shelf', () => {
+    makeBook('book-orphan');
+    makeBook('book-shelved');
+    writeLib({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-shelved'] }]
+    });
+    const changed = Engine.ensureBooksAreShelved(libDir);
+    assert.equal(changed, true);
+    const lib = readLib();
+    assert.ok(lib.shelves[0].bookIds.includes('book-orphan'));
+    assert.ok(lib.shelves[0].bookIds.includes('book-shelved'));
+  });
+
+  it('returns false when all books are already shelved', () => {
+    makeBook('book-a');
+    writeLib({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-a'] }]
+    });
+    const changed = Engine.ensureBooksAreShelved(libDir);
+    assert.equal(changed, false);
+  });
+
+  it('creates a shelf when none exist', () => {
+    makeBook('book-lonely');
+    writeLib({ authors: [{ id: 'a1', name: 'X' }], shelves: [] });
+    const changed = Engine.ensureBooksAreShelved(libDir);
+    assert.equal(changed, true);
+    const lib = readLib();
+    assert.equal(lib.shelves.length, 1);
+    assert.ok(lib.shelves[0].bookIds.includes('book-lonely'));
+  });
+
+  it('returns false when no library.json exists', () => {
+    makeBook('book-no-lib');
+    const changed = Engine.ensureBooksAreShelved(libDir);
+    assert.equal(changed, false);
+  });
+
+  it('does nothing when no book folders exist', () => {
+    writeLib({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: [] }]
+    });
+    const changed = Engine.ensureBooksAreShelved(libDir);
+    assert.equal(changed, false);
+  });
+});
