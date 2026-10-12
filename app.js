@@ -16180,18 +16180,34 @@ async function showSyncStatus() {
     nowBtn.onclick = async () => {
       nowBtn.disabled = true;
       nowBtn.textContent = t('Syncing…');
-      if (book) {
-        flushAllSaves();
-        const chains = Object.values(chapterChain);
-        if (chains.length) await Promise.allSettled(chains);
-      }
-      const r = await window.neo.syncNow();
-      bg.remove();
-      if (r && !r.error) {
-        toast(t('Sync complete'));
-        if (book) refreshFromDisk();
-      } else {
-        toast(r && r.error ? r.error : t('Sync failed'));
+      try {
+        if (book) {
+          const saves = [];
+          for (const chId of book.chapterOrder) {
+            clearTimeout(saveTimers[chId]);
+            if (chapterHTML[chId] !== undefined && chapterHTML[chId] !== savedHTML[chId]) {
+              saves.push(persistChapter(chId));
+            }
+          }
+          for (const p of Object.values(chapterChain)) saves.push(p);
+          saves.push(saveMeta());
+          if (saves.length) {
+            const timeout = new Promise((resolve) => setTimeout(resolve, 8000));
+            await Promise.race([Promise.allSettled(saves), timeout]);
+          }
+        }
+        const r = await window.neo.syncNow();
+        bg.remove();
+        if (r && !r.error) {
+          toast(t('Sync complete'));
+          if (book) refreshFromDisk();
+        } else {
+          toast(r && r.error ? r.error : t('Sync failed'));
+        }
+      } catch (err) {
+        bg.remove();
+        toast(t('Sync failed'));
+        window.neo.logError('syncNow dialog: ' + (err && err.message || err));
       }
     };
   }
@@ -16306,19 +16322,35 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'syncNow') {
     updateSyncIndicator('syncing');
     (async () => {
-      if (book) {
-        flushAllSaves();
-        // flushAllSaves fires persistChapter as microtasks — the IPC calls
-        // haven't been sent yet.  Await every chain so the chapter files are
-        // on disk before the sync engine reads them.
-        const chains = Object.values(chapterChain);
-        if (chains.length) await Promise.allSettled(chains);
-      }
-      const r = await window.neo.syncNow();
-      updateSyncIndicator(r.error ? 'error' : 'synced', r.error || '');
-      if (!r.error) {
-        toast(t('Sync complete'));
-        if (book) refreshFromDisk();
+      try {
+        if (book) {
+          // Persist every dirty chapter and collect the promises so we can
+          // wait for the writes to reach disk before the sync reads them.
+          const saves = [];
+          for (const chId of book.chapterOrder) {
+            clearTimeout(saveTimers[chId]);
+            if (chapterHTML[chId] !== undefined && chapterHTML[chId] !== savedHTML[chId]) {
+              saves.push(persistChapter(chId));
+            }
+          }
+          // Also wait for any writes already in flight from earlier saves
+          for (const p of Object.values(chapterChain)) saves.push(p);
+          saves.push(saveMeta());
+          if (saves.length) {
+            // Safety-net timeout: never stall the sync longer than 8 s
+            const timeout = new Promise((resolve) => setTimeout(resolve, 8000));
+            await Promise.race([Promise.allSettled(saves), timeout]);
+          }
+        }
+        const r = await window.neo.syncNow();
+        updateSyncIndicator(r.error ? 'error' : 'synced', r.error || '');
+        if (!r.error) {
+          toast(t('Sync complete'));
+          if (book) refreshFromDisk();
+        }
+      } catch (err) {
+        updateSyncIndicator('error', err && err.message || '');
+        window.neo.logError('syncNow menu: ' + (err && err.message || err));
       }
     })();
   }
