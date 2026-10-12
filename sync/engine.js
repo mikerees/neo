@@ -370,9 +370,35 @@ async function syncPull() {
       }
     }
 
-    // Safety net: ensure every book folder on disk is on a shelf, even if
-    // library.json was not in this download batch (e.g. it was synced before
-    // the merge code existed, or only book folders were pulled this time).
+    // Always merge library.json with remote even if diffManifest said it was
+    // current — the local copy may have orphaned authorIds or missing books
+    // from a previous sync that ran before the merge code existed.
+    const libWasDownloaded = diff.toDownload.some(
+      (d) => d.remote && d.remote.relativePath === 'library.json'
+    );
+    if (!libWasDownloaded) {
+      const libEntry = Manifest.findByPath(manifest, 'library.json');
+      if (libEntry) {
+        try {
+          const remotePlaintext = await downloadAndDecrypt(
+            libEntry.objectId, libEntry.objectVersion, ck
+          );
+          if (remotePlaintext) {
+            const absLib = path.join(_libraryDir, 'library.json');
+            mergeLibraryJson(absLib, remotePlaintext, _libraryDir);
+            const mergedHash = localFileHash(absLib);
+            State.markSynced(state, libEntry.objectId, 'library.json',
+              mergedHash || libEntry.contentHash, libEntry.objectVersion);
+            downloaded++;
+          }
+        } catch (err) {
+          if (_logError) _logError('sync pull library reconcile', err);
+        }
+      }
+    }
+
+    // Safety net: remap orphaned shelf authorIds and shelve any book folder
+    // on disk that isn't on a shelf yet.
     if (ensureBooksAreShelved(_libraryDir)) downloaded++;
 
     state.lastSyncAt = new Date().toISOString();
@@ -536,20 +562,40 @@ function ensureBooksAreShelved(libraryDir) {
   let lib;
   try { lib = JSON.parse(fs.readFileSync(absPath, 'utf8')); } catch { return false; }
 
+  const authors = Array.isArray(lib.authors) && lib.authors.length ? lib.authors : [];
+  const authorIds = new Set(authors.map((a) => a.id));
   const shelves = Array.isArray(lib.shelves) ? lib.shelves : [];
+  let changed = false;
+
+  // Remap orphaned shelf authorIds: a shelf whose authorId doesn't match
+  // any local author becomes invisible in shelvesFor(). Remap it to the
+  // first author so the books on it become visible again.
+  if (authors.length > 0) {
+    const firstId = authors[0].id;
+    for (const shelf of shelves) {
+      if (shelf.authorId && !authorIds.has(shelf.authorId)) {
+        shelf.authorId = firstId;
+        changed = true;
+      }
+    }
+  }
+
+  // Unshelved book folders on disk go on the first shelf
   const allOnDisk = listBookFoldersOnDisk(libraryDir);
   const shelvedSet = new Set(shelves.flatMap((s) => s.bookIds || []));
   const unshelved = allOnDisk.filter((id) => !shelvedSet.has(id));
 
-  if (unshelved.length === 0) return false;
-
-  if (shelves.length > 0) {
-    for (const id of unshelved) shelves[0].bookIds.push(id);
-  } else {
-    shelves.push({ id: 's-' + Date.now().toString(36), name: 'Shelf', bookIds: unshelved });
-    lib.shelves = shelves;
+  if (unshelved.length > 0) {
+    if (shelves.length > 0) {
+      for (const id of unshelved) shelves[0].bookIds.push(id);
+    } else {
+      shelves.push({ id: 's-' + Date.now().toString(36), name: 'Shelf', bookIds: unshelved });
+      lib.shelves = shelves;
+    }
+    changed = true;
   }
 
+  if (!changed) return false;
   writeFileDurable(absPath, JSON.stringify(lib, null, 2));
   return true;
 }

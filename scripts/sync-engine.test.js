@@ -831,4 +831,69 @@ describe('ensureBooksAreShelved', () => {
     const changed = Engine.ensureBooksAreShelved(libDir);
     assert.equal(changed, false);
   });
+
+  it('remaps orphaned shelf authorIds to the first author', () => {
+    makeBook('book-synced');
+    writeLib({
+      authors: [{ id: 'a-laptop', name: 'Alice' }],
+      shelves: [
+        { id: 's-home', name: 'WIP', bookIds: ['book-synced'], authorId: 'a-home' },
+        { id: 's-laptop', name: 'WIP', bookIds: [], authorId: 'a-laptop' }
+      ]
+    });
+    const changed = Engine.ensureBooksAreShelved(libDir);
+    assert.equal(changed, true);
+    const lib = readLib();
+    // The orphaned shelf's authorId should now be the first author's id
+    const homeShelf = lib.shelves.find((s) => s.id === 's-home');
+    assert.equal(homeShelf.authorId, 'a-laptop');
+    // The laptop's shelf should be untouched
+    const laptopShelf = lib.shelves.find((s) => s.id === 's-laptop');
+    assert.equal(laptopShelf.authorId, 'a-laptop');
+    // The book should still be on the home shelf
+    assert.ok(homeShelf.bookIds.includes('book-synced'));
+  });
+
+  it('remaps multiple orphaned shelves at once', () => {
+    writeLib({
+      authors: [{ id: 'a1', name: 'Writer' }],
+      shelves: [
+        { id: 's1', name: 'WIP', bookIds: ['book-a'], authorId: 'a-ghost-1' },
+        { id: 's2', name: 'Archive', bookIds: ['book-b'], authorId: 'a-ghost-2' },
+        { id: 's3', name: 'Local', bookIds: [], authorId: 'a1' }
+      ]
+    });
+    const changed = Engine.ensureBooksAreShelved(libDir);
+    assert.equal(changed, true);
+    const lib = readLib();
+    assert.equal(lib.shelves[0].authorId, 'a1');
+    assert.equal(lib.shelves[1].authorId, 'a1');
+    assert.equal(lib.shelves[2].authorId, 'a1');
+  });
+
+  it('does not touch shelves with valid authorIds', () => {
+    makeBook('book-ok');
+    writeLib({
+      authors: [{ id: 'a1', name: 'X' }, { id: 'a2', name: 'Y' }],
+      shelves: [
+        { id: 's1', name: 'WIP', bookIds: ['book-ok'], authorId: 'a2' }
+      ]
+    });
+    const changed = Engine.ensureBooksAreShelved(libDir);
+    assert.equal(changed, false);
+    const lib = readLib();
+    assert.equal(lib.shelves[0].authorId, 'a2');
+  });
+
+  it('handles shelves with no authorId (defaults to first author)', () => {
+    makeBook('book-default');
+    writeLib({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [
+        { id: 's1', name: 'WIP', bookIds: ['book-default'] }
+      ]
+    });
+    const changed = Engine.ensureBooksAreShelved(libDir);
+    assert.equal(changed, false);
+  });
 });
