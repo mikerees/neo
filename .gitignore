@@ -1,6 +1,9 @@
 # dependencies
 node_modules/
 
+# local OAuth config (use .env.example as a template)
+.env
+
 # build output
 dist/
 

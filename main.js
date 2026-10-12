@@ -62,6 +62,9 @@ function writeSettings(obj) {
 const NeoI18n = require('./i18n.js');
 const { t } = NeoI18n;
 const LOCALES_DIR = path.join(__dirname, 'locales');
+
+// Sync — end-to-end encrypted Google Drive sync (opt-in)
+const SyncIPC = require('./sync/sync-ipc.js');
 let uiLanguage = 'en';
 
 function readLocaleFile(code) {
@@ -540,6 +543,7 @@ ipcMain.handle('library:write', (_e, data) => {
   ensureLibrary();
   writeJSON(LIBRARY_FILE, data);
   writeCatalog();
+  SyncIPC.onFileSaved('library.json');
   return true;
 });
 
@@ -651,6 +655,7 @@ ipcMain.handle('book:writeMeta', (_e, bookId, meta) => {
   meta.modified = new Date().toISOString();
   writeJSON(path.join(bookDir(bookId), 'book.json'), meta);
   writeCatalog();
+  SyncIPC.onFileSaved(bookId + '/book.json');
   return meta.modified;
 });
 
@@ -697,6 +702,7 @@ ipcMain.handle('chapter:write', (_e, bookId, chapterId, html, expected) => {
     if (cur !== null && chapterDiverged(cur, expected, html)) return { conflict: cur };
   }
   writeFileDurable(file, html);
+  SyncIPC.onFileSaved(bookId + '/chapters/' + libName(chapterId) + '.html');
   return true;
 });
 // shared with Pocket's bridge (same rule): the disk copy differs from what
@@ -718,6 +724,7 @@ function chapterDiverged(cur, expected, html) {
 ipcMain.handle('chapter:delete', (_e, bookId, chapterId) => {
   const file = path.join(bookDir(bookId), 'chapters', libName(chapterId) + '.html');
   if (fs.existsSync(file)) fs.unlinkSync(file);
+  SyncIPC.onFileDeleted(bookId + '/chapters/' + libName(chapterId) + '.html');
   return true;
 });
 
@@ -733,6 +740,7 @@ ipcMain.handle('aux:read', (_e, bookId, name) => {
 
 ipcMain.handle('aux:write', (_e, bookId, name, html) => {
   writeFileDurable(path.join(bookDir(bookId), libName(name) + '.html'), html);
+  SyncIPC.onFileSaved(bookId + '/' + libName(name) + '.html');
   return true;
 });
 
@@ -790,6 +798,7 @@ ipcMain.handle('json:read', (_e, bookId, name, fallback) => {
 
 ipcMain.handle('json:write', (_e, bookId, name, data) => {
   writeJSON(path.join(bookDir(bookId), libName(name) + '.json'), data);
+  SyncIPC.onFileSaved(bookId + '/' + libName(name) + '.json');
   return true;
 });
 
@@ -860,6 +869,7 @@ ipcMain.handle('cover:set', (_e, bookId, srcPath) => {
   for (const f of fs.readdirSync(dir)) {
     if (/^cover-\d+\./.test(f) && f !== fname) fs.unlinkSync(path.join(dir, f));
   }
+  SyncIPC.onFileSaved(bookId + '/' + fname);
   return fname;
 });
 
@@ -2388,6 +2398,21 @@ function buildMenu() {
       ]
     },
     {
+      label: t('Sync'),
+      submenu: SyncIPC.isSyncEnabled() ? [
+        { label: t('Sync Now'), accelerator: 'CmdOrCtrl+Shift+S', click: () => sendToWindow({ type: 'syncNow' }) },
+        { type: 'separator' },
+        { label: t('Sync Status…'), click: () => sendToWindow({ type: 'syncStatusDialog' }) },
+        { label: t('Change Sync Password…'), click: () => sendToWindow({ type: 'syncChangePassword' }) },
+        { label: t('Show Recovery Key…'), click: () => sendToWindow({ type: 'syncRecoveryKey' }) },
+        { type: 'separator' },
+        { label: t('Disconnect Sync…'), click: () => sendToWindow({ type: 'syncDisconnect' }) }
+      ] : [
+        { label: t('Set Up Sync…'), click: () => sendToWindow({ type: 'syncSetup' }) },
+        { label: t('Connect to Existing Sync…'), click: () => sendToWindow({ type: 'syncConnect' }) }
+      ]
+    },
+    {
       // macOS slips Writing Tools and AutoFill into this menu on its own;
       // hideSystemEditItems() hides them again (see below)
       label: t('Edit'),
@@ -3011,6 +3036,26 @@ app.whenReady().then(() => {
     try { announceLibraryFallback(); } catch (err) { logError('library notice', err); }
     try { initSpell(); } catch (err) { logError('spell', err); }
     try { buildMenu(); } catch (err) { logError('menu', err); }
+    try {
+      SyncIPC.register({
+        libraryDir: LIBRARY_DIR,
+        appRoot: __dirname,
+        sendToWindow,
+        logError,
+        readSecret,
+        writeSecret: (name, value) => {
+          const { safeStorage } = require('electron');
+          const all = readJSON(SECRETS_FILE(), {});
+          if (!value) { delete all[name]; }
+          else if (safeStorage.isEncryptionAvailable()) {
+            all[name] = { enc: true, value: safeStorage.encryptString(String(value)).toString('base64') };
+          } else {
+            all[name] = { enc: false, value: String(value) };
+          }
+          writeJSON(SECRETS_FILE(), all);
+        }
+      });
+    } catch (err) { logError('sync', err); }
     try { dailyBackup(); } catch (err) { logError('backup', err); }
     // NEO left open for days still makes each day's backup (and retries one
     // that failed); an existing day's zip makes this a no-op
@@ -3027,6 +3072,10 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('browser-window-focus', () => {
+  SyncIPC.triggerPull();
 });
 
 app.on('window-all-closed', () => {

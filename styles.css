@@ -1308,6 +1308,15 @@ body.full-screen.focus-mode #bottombar:not(:hover):not(.attn) { opacity: 0; }
 }
 #zoom-control button:hover, #zoom-control:hover { color: #ddd; }
 
+/* --- Sync indicator --- */
+.sync-indicator {
+  display: inline-block; font-size: 13px; min-width: 16px; text-align: center;
+  cursor: pointer; transition: opacity 0.5s; user-select: none;
+}
+.sync-indicator:hover { opacity: 1 !important; }
+.sync-syncing { animation: sync-spin 1.2s linear infinite; }
+@keyframes sync-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
 /* --- Find & replace bar --- */
 #searchbar {
   position: fixed; top: 34px; left: 50%; transform: translateX(-50%);
