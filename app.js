@@ -15989,7 +15989,7 @@ async function setEditorFontSize(value) {
 }
 
 /* ================================================================== */
-/*  SYNC                                                               */
+/*  GIT SYNC (NEO Library folder)                                    */
 /* ================================================================== */
 
 // Status indicator in the bottom bar
@@ -16003,7 +16003,7 @@ function ensureSyncIndicator() {
   syncIndicator.className = 'sync-indicator';
   syncIndicator.title = t('Sync');
   syncIndicator.style.cursor = 'pointer';
-  syncIndicator.onclick = () => showSyncStatus();
+  syncIndicator.onclick = () => showGitSyncStatus();
   bar.prepend(syncIndicator);
   return syncIndicator;
 }
@@ -16013,11 +16013,11 @@ function updateSyncIndicator(state, detail) {
   if (!el) return;
   el.className = 'sync-indicator sync-' + (state || 'disabled');
   el.setAttribute('data-state', state || 'disabled');
-  // States: synced (checkmark), syncing (spinner), offline, error, disabled (hidden)
   const icons = { synced: '\u2713', syncing: '\u21BB', offline: '\u2601', error: '\u26A0', disabled: '' };
   el.textContent = icons[state] || '';
   el.title = detail || t('Sync');
   if (state === 'synced') {
+    el.style.display = '';
     el.style.opacity = '0.6';
     clearTimeout(el._fadeTimer);
     el._fadeTimer = setTimeout(() => { el.style.opacity = '0.15'; }, 3000);
@@ -16029,7 +16029,6 @@ function updateSyncIndicator(state, detail) {
   }
 }
 
-// Modal helper (reuses NEO's existing modal pattern)
 function syncModal(title, bodyHtml, opts = {}) {
   return new Promise((resolve) => {
     const bg = document.createElement('div');
@@ -16047,259 +16046,102 @@ function syncModal(title, bodyHtml, opts = {}) {
   });
 }
 
-// ------ Set Up Sync ------
-async function showSyncSetup() {
-  const { bg, body } = await syncModal(t('Set Up Sync'), `
-    <p>${t('Sync encrypts your library end-to-end and stores it on Google Drive. Google never sees your words.')}</p>
-    <button class="btn-gold sync-sign-in">${t('Sign in with Google')}</button>
-    <div class="sync-step2" hidden>
-      <label>${t('Choose a sync password')}
-        <input type="password" class="sync-pw" autocomplete="off" />
-      </label>
-      <label>${t('Confirm password')}
-        <input type="password" class="sync-pw-confirm" autocomplete="off" />
-      </label>
-      <p class="soft" style="font-size:0.85em">${t('This password protects your sync data. If you lose it and your recovery key, your synced data cannot be recovered.')}</p>
-      <button class="btn-gold sync-go" disabled>${t('Set up')}</button>
-    </div>
-    <div class="sync-step3" hidden>
-      <p><strong>${t('Recovery Key')}</strong></p>
-      <textarea class="sync-recovery" readonly rows="2" style="width:100%;font-family:monospace;font-size:13px"></textarea>
-      <p class="soft" style="font-size:0.85em;color:#c44">${t('Save this key somewhere safe. If you forget your password, this is the only way to recover your data.')}</p>
-      <label style="display:flex;align-items:center;gap:6px;margin:10px 0">
-        <input type="checkbox" class="sync-saved-check" /> ${t('I have saved my recovery key')}
-      </label>
-      <button class="btn-gold sync-done" disabled>${t('Done')}</button>
-    </div>
-    <p class="sync-error" hidden style="color:#c44"></p>
-  `);
-
-  const signInBtn = body.querySelector('.sync-sign-in');
-  const step2 = body.querySelector('.sync-step2');
-  const step3 = body.querySelector('.sync-step3');
-  const pwInput = body.querySelector('.sync-pw');
-  const pwConfirm = body.querySelector('.sync-pw-confirm');
-  const goBtn = body.querySelector('.sync-go');
-  const errEl = body.querySelector('.sync-error');
-  const recoveryArea = body.querySelector('.sync-recovery');
-  const savedCheck = body.querySelector('.sync-saved-check');
-  const doneBtn = body.querySelector('.sync-done');
-
-  const showErr = (msg) => { errEl.textContent = msg; errEl.hidden = false; };
-
-  signInBtn.onclick = async () => {
-    signInBtn.disabled = true;
-    signInBtn.textContent = t('Signing in…');
-    const r = await window.neo.syncSignIn();
-    if (r.error) { showErr(r.error); signInBtn.disabled = false; signInBtn.textContent = t('Sign in with Google'); return; }
-    signInBtn.hidden = true;
-    step2.hidden = false;
-    pwInput.focus();
-  };
-
-  const checkPw = () => {
-    goBtn.disabled = !pwInput.value || pwInput.value !== pwConfirm.value;
-  };
-  pwInput.oninput = checkPw;
-  pwConfirm.oninput = checkPw;
-
-  goBtn.onclick = async () => {
-    if (pwInput.value !== pwConfirm.value) { showErr(t('Passwords do not match')); return; }
-    goBtn.disabled = true;
-    goBtn.textContent = t('Setting up…');
-    const r = await window.neo.syncSetup(pwInput.value);
-    if (r.error) { showErr(r.error); goBtn.disabled = false; goBtn.textContent = t('Set up'); return; }
-    step2.hidden = true;
-    recoveryArea.value = r.recoveryKey;
-    step3.hidden = false;
-    updateSyncIndicator('syncing', t('Initial upload…'));
-  };
-
-  savedCheck.onchange = () => { doneBtn.disabled = !savedCheck.checked; };
-  doneBtn.onclick = () => { bg.remove(); };
+async function flushBeforeGitSync() {
+  if (!book) return;
+  const saves = [];
+  for (const chId of book.chapterOrder) {
+    clearTimeout(saveTimers[chId]);
+    if (chapterHTML[chId] !== undefined && chapterHTML[chId] !== savedHTML[chId]) {
+      saves.push(persistChapter(chId));
+    }
+  }
+  for (const p of Object.values(chapterChain)) saves.push(p);
+  saves.push(saveMeta());
+  if (!saves.length) return;
+  const timeout = new Promise((resolve) => setTimeout(resolve, 8000));
+  await Promise.race([Promise.allSettled(saves), timeout]);
 }
 
-// ------ Connect to Existing Sync ------
-async function showSyncConnect() {
-  const { bg, body } = await syncModal(t('Connect to Existing Sync'), `
-    <p>${t('Sign in to the same Google account you used on your first device.')}</p>
-    <button class="btn-gold sync-sign-in">${t('Sign in with Google')}</button>
-    <div class="sync-step2" hidden>
-      <label>${t('Enter your sync password')}
-        <input type="password" class="sync-pw" autocomplete="off" />
-      </label>
-      <button class="btn-gold sync-go" style="margin-top:8px">${t('Connect')}</button>
-      <p class="soft" style="font-size:0.85em;margin-top:8px">${t('Your local files will not be deleted. New files from the other device will be added.')}</p>
+async function runGitSyncNow() {
+  await flushBeforeGitSync();
+  return window.neo.gitSyncNow();
+}
+
+async function showGitSyncSetRemote() {
+  const st = await window.neo.gitSyncStatus();
+  const { bg, body } = await syncModal(t('Set Git Remote…'), `
+    <label>${t('Remote URL')}
+      <input type="text" class="git-remote" style="width:100%" placeholder="git@github.com:you/neo-library.git" value="${escHtml(st.remote || '')}" />
+    </label>
+    <label>${t('Branch')}
+      <input type="text" class="git-branch" style="width:100%" value="${escHtml(st.branch || 'main')}" />
+    </label>
+    <p class="soft" style="font-size:0.85em">${t('Uses git on your computer and your existing credentials. The NEO Library folder becomes a git repository.')}</p>
+    <div style="text-align:right;margin-top:12px">
+      <button class="btn-gold git-save-remote">${t('Save')}</button>
     </div>
     <p class="sync-error" hidden style="color:#c44"></p>
   `);
-
-  const signInBtn = body.querySelector('.sync-sign-in');
-  const step2 = body.querySelector('.sync-step2');
-  const pwInput = body.querySelector('.sync-pw');
-  const goBtn = body.querySelector('.sync-go');
+  const btn = body.querySelector('.git-save-remote');
   const errEl = body.querySelector('.sync-error');
-  const showErr = (msg) => { errEl.textContent = msg; errEl.hidden = false; };
-
-  signInBtn.onclick = async () => {
-    signInBtn.disabled = true;
-    signInBtn.textContent = t('Signing in…');
-    const r = await window.neo.syncSignIn();
-    if (r.error) { showErr(r.error); signInBtn.disabled = false; signInBtn.textContent = t('Sign in with Google'); return; }
-    signInBtn.hidden = true;
-    step2.hidden = false;
-    pwInput.focus();
-  };
-
-  goBtn.onclick = async () => {
-    if (!pwInput.value) return;
-    goBtn.disabled = true;
-    goBtn.textContent = t('Connecting…');
-    const r = await window.neo.syncConnect(pwInput.value);
-    if (r.error) { showErr(r.error); goBtn.disabled = false; goBtn.textContent = t('Connect'); return; }
+  btn.onclick = async () => {
+    const remote = body.querySelector('.git-remote').value;
+    const branch = body.querySelector('.git-branch').value;
+    btn.disabled = true;
+    const r = await window.neo.gitSyncSetRemote(remote, branch);
+    if (r.error) {
+      errEl.textContent = r.error;
+      errEl.hidden = false;
+      btn.disabled = false;
+      return;
+    }
     bg.remove();
-    toast(t('Sync connected. Your library is syncing.'));
-    updateSyncIndicator('syncing', t('Downloading…'));
+    updateSyncIndicator('synced');
+    toast(t('Git remote saved'));
   };
 }
 
-// ------ Sync Status ------
-async function showSyncStatus() {
-  const st = await window.neo.syncStatus();
-  const { bg } = await syncModal(t('Sync Status'), `
+async function showGitSyncStatus() {
+  const st = await window.neo.gitSyncStatus();
+  const gitLine = st.gitAvailable === false ? t('git not found on PATH') : (st.statusLine || '—');
+  const { bg } = await syncModal(t('Git Status…'), `
     <table style="width:100%;font-size:0.9em">
-      <tr><td style="opacity:0.6">${t('Status')}</td><td>${st.state || t('Disabled')}</td></tr>
-      <tr><td style="opacity:0.6">${t('Account')}</td><td>${st.account || '—'}</td></tr>
-      <tr><td style="opacity:0.6">${t('Last sync')}</td><td>${st.lastSync ? new Date(st.lastSync).toLocaleString() : '—'}</td></tr>
-      <tr><td style="opacity:0.6">${t('Pending')}</td><td>${st.pending || 0}</td></tr>
+      <tr><td style="opacity:0.6">${t('Remote')}</td><td style="word-break:break-all">${escHtml(st.remote || '—')}</td></tr>
+      <tr><td style="opacity:0.6">${t('Branch')}</td><td>${escHtml(st.branch || 'main')}</td></tr>
+      <tr><td style="opacity:0.6">${t('Repository')}</td><td>${st.isRepo ? t('Yes') : t('No')}</td></tr>
+      <tr><td style="opacity:0.6">${t('Status')}</td><td><code style="font-size:0.85em">${escHtml(gitLine)}</code></td></tr>
+      <tr><td style="opacity:0.6">${t('Uncommitted')}</td><td>${st.dirty ? t('Yes') : t('No')}</td></tr>
     </table>
-    ${st.enabled ? '<div style="text-align:right;margin-top:12px"><button class="btn-gold sync-now-btn">' + t('Sync Now') + '</button></div>' : ''}
-  `);
+    ${st.porcelain ? '<pre style="font-size:0.75em;max-height:120px;overflow:auto;margin-top:8px">' + escHtml(st.porcelain) + '</pre>' : ''}
+    ${st.configured ? '<div style="text-align:right;margin-top:12px"><button class="btn-gold sync-now-btn">' + t('Sync Now') + '</button></div>' : ''}
+  `, { noButtons: !st.configured });
   const nowBtn = bg.querySelector('.sync-now-btn');
   if (nowBtn) {
     nowBtn.onclick = async () => {
       nowBtn.disabled = true;
       nowBtn.textContent = t('Syncing…');
+      updateSyncIndicator('syncing');
       try {
-        if (book) {
-          const saves = [];
-          for (const chId of book.chapterOrder) {
-            clearTimeout(saveTimers[chId]);
-            if (chapterHTML[chId] !== undefined && chapterHTML[chId] !== savedHTML[chId]) {
-              saves.push(persistChapter(chId));
-            }
-          }
-          for (const p of Object.values(chapterChain)) saves.push(p);
-          saves.push(saveMeta());
-          if (saves.length) {
-            const timeout = new Promise((resolve) => setTimeout(resolve, 8000));
-            await Promise.race([Promise.allSettled(saves), timeout]);
-          }
-        }
-        const r = await window.neo.syncNow();
+        const r = await runGitSyncNow();
         bg.remove();
-        if (r && !r.error) {
+        updateSyncIndicator(r.error ? 'error' : 'synced', r.error || '');
+        if (r.error) toast(r.error, 8000);
+        else {
           toast(t('Sync complete'));
           if (book) refreshFromDisk();
-        } else {
-          toast(r && r.error ? r.error : t('Sync failed'), 8000);
         }
       } catch (err) {
         bg.remove();
+        updateSyncIndicator('error', err && err.message || '');
         toast((err && err.message) || t('Sync failed'), 8000);
-        window.neo.logError('syncNow dialog: ' + (err && err.message || err));
       }
     };
   }
 }
 
-// ------ Change Password ------
-async function showSyncChangePassword() {
-  const { bg, body } = await syncModal(t('Change Sync Password'), `
-    <label>${t('Current password')}
-      <input type="password" class="sync-old-pw" autocomplete="off" />
-    </label>
-    <label>${t('New password')}
-      <input type="password" class="sync-new-pw" autocomplete="off" />
-    </label>
-    <label>${t('Confirm new password')}
-      <input type="password" class="sync-new-pw2" autocomplete="off" />
-    </label>
-    <div style="text-align:right;margin-top:12px">
-      <button class="btn-gold sync-change-btn">${t('Change Password')}</button>
-    </div>
-    <p class="sync-error" hidden style="color:#c44"></p>
-  `);
-  const btn = body.querySelector('.sync-change-btn');
-  const errEl = body.querySelector('.sync-error');
-  btn.onclick = async () => {
-    const oldPw = body.querySelector('.sync-old-pw').value;
-    const newPw = body.querySelector('.sync-new-pw').value;
-    const newPw2 = body.querySelector('.sync-new-pw2').value;
-    if (newPw !== newPw2) { errEl.textContent = t('Passwords do not match'); errEl.hidden = false; return; }
-    btn.disabled = true;
-    const r = await window.neo.syncChangePassword(oldPw, newPw);
-    if (r.error) { errEl.textContent = r.error; errEl.hidden = false; btn.disabled = false; return; }
-    bg.remove();
-    toast(t('Sync password changed'));
-  };
-}
-
-// ------ Show Recovery Key ------
-async function showSyncRecoveryKey() {
-  const { bg, body } = await syncModal(t('Recovery Key'), `
-    <label>${t('Enter your sync password to reveal your recovery key')}
-      <input type="password" class="sync-pw" autocomplete="off" />
-    </label>
-    <div style="text-align:right;margin-top:8px">
-      <button class="btn-gold sync-reveal-btn">${t('Reveal')}</button>
-    </div>
-    <div class="sync-key-box" hidden style="margin-top:12px">
-      <textarea class="sync-recovery" readonly rows="2" style="width:100%;font-family:monospace;font-size:13px"></textarea>
-      <p class="soft" style="font-size:0.85em;color:#c44">${t('Keep this key safe and private.')}</p>
-    </div>
-    <p class="sync-error" hidden style="color:#c44"></p>
-  `);
-  const btn = body.querySelector('.sync-reveal-btn');
-  const errEl = body.querySelector('.sync-error');
-  btn.onclick = async () => {
-    const pw = body.querySelector('.sync-pw').value;
-    btn.disabled = true;
-    const r = await window.neo.syncRecoveryKey(pw);
-    if (r.error) { errEl.textContent = r.error; errEl.hidden = false; btn.disabled = false; return; }
-    body.querySelector('.sync-key-box').hidden = false;
-    body.querySelector('.sync-recovery').value = r.key;
-    btn.hidden = true;
-  };
-}
-
-// ------ Disconnect Sync ------
-async function showSyncDisconnect() {
-  const { bg, body } = await syncModal(t('Disconnect Sync'), `
-    <p>${t('Your local files will not be removed.')}</p>
-    <label style="display:flex;align-items:center;gap:6px;margin:10px 0">
-      <input type="checkbox" class="sync-remove-remote" /> ${t('Also delete all data from Google Drive')}
-    </label>
-    <p class="soft" style="font-size:0.85em">${t('This cannot be undone. Other devices will lose access to the synced library.')}</p>
-    <div style="text-align:right;margin-top:12px">
-      <button class="sync-cancel" style="margin-right:8px">${t('Cancel')}</button>
-      <button class="btn-gold sync-disconnect-btn">${t('Disconnect')}</button>
-    </div>
-  `);
-  const btn = body.querySelector('.sync-disconnect-btn');
-  btn.onclick = async () => {
-    btn.disabled = true;
-    const removeRemote = body.querySelector('.sync-remove-remote').checked;
-    await window.neo.syncSignOut({ removeRemote });
-    bg.remove();
-    updateSyncIndicator('disabled');
-    toast(t('Sync disconnected'));
-  };
-}
-
-// Initialise indicator on load if sync is enabled
-window.neo.syncStatus().then((st) => {
-  if (st.enabled) updateSyncIndicator(st.state || 'synced');
+window.neo.gitSyncStatus().then((st) => {
+  if (st.configured) updateSyncIndicator('synced');
+  else updateSyncIndicator('disabled');
 }).catch(() => {});
 
 window.neo.onMenu(async (msg) => {
@@ -16316,63 +16158,26 @@ window.neo.onMenu(async (msg) => {
   }
   if (msg.type === 'help') showHelp();
   if (msg.type === 'about') showAbout();
-  // Sync
-  if (msg.type === 'syncSetup') showSyncSetup();
-  if (msg.type === 'syncConnect') showSyncConnect();
+  if (msg.type === 'gitSyncSetRemote') showGitSyncSetRemote();
+  if (msg.type === 'gitSyncStatusDialog') showGitSyncStatus();
   if (msg.type === 'syncNow') {
     updateSyncIndicator('syncing');
     (async () => {
       try {
-        if (book) {
-          // Persist every dirty chapter and collect the promises so we can
-          // wait for the writes to reach disk before the sync reads them.
-          const saves = [];
-          for (const chId of book.chapterOrder) {
-            clearTimeout(saveTimers[chId]);
-            if (chapterHTML[chId] !== undefined && chapterHTML[chId] !== savedHTML[chId]) {
-              saves.push(persistChapter(chId));
-            }
-          }
-          // Also wait for any writes already in flight from earlier saves
-          for (const p of Object.values(chapterChain)) saves.push(p);
-          saves.push(saveMeta());
-          if (saves.length) {
-            // Safety-net timeout: never stall the sync longer than 8 s
-            const timeout = new Promise((resolve) => setTimeout(resolve, 8000));
-            await Promise.race([Promise.allSettled(saves), timeout]);
-          }
-        }
-        const r = await window.neo.syncNow();
-        // Defer the final indicator update: engine status() messages sent
-        // via webContents.send during syncAll can arrive at the renderer
-        // after the IPC response, overriding the indicator.  A short
-        // setTimeout ensures our final state wins.
-        setTimeout(() => updateSyncIndicator(r.error ? 'error' : 'synced', r.error || ''), 120);
-        if (r.error) {
-          toast(r.error, 8000);
-        } else {
+        const r = await runGitSyncNow();
+        updateSyncIndicator(r.error ? 'error' : 'synced', r.error || '');
+        if (r.error) toast(r.error, 8000);
+        else {
           toast(t('Sync complete'));
           if (book) refreshFromDisk();
         }
       } catch (err) {
-        setTimeout(() => updateSyncIndicator('error', err && err.message || ''), 120);
+        updateSyncIndicator('error', err && err.message || '');
         toast((err && err.message) || t('Sync failed'), 8000);
-        window.neo.logError('syncNow menu: ' + (err && err.message || err));
+        window.neo.logError('gitSyncNow: ' + (err && err.message || err));
       }
     })();
   }
-  if (msg.type === 'syncStatusDialog') showSyncStatus();
-  if (msg.type === 'syncChangePassword') showSyncChangePassword();
-  if (msg.type === 'syncRecoveryKey') showSyncRecoveryKey();
-  if (msg.type === 'syncDisconnect') showSyncDisconnect();
-  if (msg.type === 'syncStatus') updateSyncIndicator(msg.state, msg.detail);
-  if (msg.type === 'syncConflict') {
-    const n = msg.conflicts ? msg.conflicts.length : 0;
-    if (n > 0) toast(t('Sync found {n} conflicting files. Check your chapters for "(from other device)" copies.', { n }), 8000);
-    updateSyncIndicator('synced');
-  }
-  if (msg.type === 'syncEnabled') updateSyncIndicator('syncing');
-  if (msg.type === 'syncDisabled') updateSyncIndicator('disabled');
   if (msg.type === 'checkUpdate') checkForUpdate();
   if (msg.type === 'update') updateMessage(msg);
   if (msg.type === 'export') doExport(msg.format);

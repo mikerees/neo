@@ -72,17 +72,9 @@ contextBridge.exposeInMainWorld('neo', {
 
   writingStyleState: (st) => ipcRenderer.send('style:state', st),
   viewState: (st) => ipcRenderer.send('view:state', st),
-  // Sync — the master key and tokens never cross this bridge
-  syncStatus: () => ipcRenderer.invoke('sync:status'),
-  syncSetup: (password) => ipcRenderer.invoke('sync:setup', password),
-  syncConnect: (password) => ipcRenderer.invoke('sync:connect', password),
-  syncSignIn: () => ipcRenderer.invoke('sync:signIn'),
-  syncSignOut: (opts) => ipcRenderer.invoke('sync:signOut', opts),
-  syncNow: () => ipcRenderer.invoke('sync:now'),
-  syncChangePassword: (o, n) => ipcRenderer.invoke('sync:changePassword', o, n),
-  syncRecoveryKey: (pw) => ipcRenderer.invoke('sync:recoveryKey', pw),
-  syncRecover: (key, pw) => ipcRenderer.invoke('sync:recover', key, pw),
-  syncResolveConflict: (id, keep) => ipcRenderer.invoke('sync:resolveConflict', id, keep),
+  gitSyncStatus: () => ipcRenderer.invoke('gitSync:status'),
+  gitSyncSetRemote: (remote, branch) => ipcRenderer.invoke('gitSync:setRemote', remote, branch),
+  gitSyncNow: () => ipcRenderer.invoke('gitSync:now'),
 
   onMenu: (cb) => ipcRenderer.on('menu', (_e, msg) => cb(msg))
 });
