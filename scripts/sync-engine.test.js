@@ -541,3 +541,219 @@ describe('sync engine logic', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// library.json merge
+// ---------------------------------------------------------------------------
+
+const Engine = require('../sync/engine.js');
+
+describe('mergeLibraryJson', () => {
+  let tmpDir, libDir, libPath;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-merge-'));
+    libDir = path.join(tmpDir, 'Library');
+    fs.mkdirSync(libDir, { recursive: true });
+    libPath = path.join(libDir, 'library.json');
+  });
+
+  function writeLocal(obj) {
+    fs.writeFileSync(libPath, JSON.stringify(obj, null, 2));
+  }
+  function remoteBuffer(obj) {
+    return Buffer.from(JSON.stringify(obj));
+  }
+  function makeBook(id) {
+    const dir = path.join(libDir, id, 'chapters');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'ch-1.html'), '<p>text</p>');
+  }
+
+  it('merges authors by name (case-insensitive), remapping IDs', () => {
+    writeLocal({
+      authors: [{ id: 'a1', name: 'Alice' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-local'], authorId: 'a1' }],
+      firstRunDone: true
+    });
+    const remote = remoteBuffer({
+      authors: [{ id: 'a-remote-1', name: 'alice' }],
+      shelves: [{ id: 's-remote', name: 'WIP', bookIds: ['book-remote'], authorId: 'a-remote-1' }]
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+
+    // Only one author: 'a1' (local wins, remote remapped)
+    assert.equal(merged.authors.length, 1);
+    assert.equal(merged.authors[0].id, 'a1');
+    assert.equal(merged.authors[0].name, 'Alice');
+
+    // Remote shelf is added, with authorId remapped to local 'a1'
+    const remoteShelf = merged.shelves.find((s) => s.id === 's-remote');
+    assert.ok(remoteShelf);
+    assert.equal(remoteShelf.authorId, 'a1');
+    assert.ok(remoteShelf.bookIds.includes('book-remote'));
+  });
+
+  it('merges authors with same default id a1', () => {
+    writeLocal({
+      authors: [{ id: 'a1', name: 'Bob' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-1'] }]
+    });
+    const remote = remoteBuffer({
+      authors: [{ id: 'a1', name: 'Bob' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-2'] }]
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+
+    assert.equal(merged.authors.length, 1);
+    assert.equal(merged.authors[0].id, 'a1');
+    // Both books on the same shelf
+    const shelf = merged.shelves.find((s) => s.id === 's1');
+    assert.ok(shelf.bookIds.includes('book-1'));
+    assert.ok(shelf.bookIds.includes('book-2'));
+  });
+
+  it('adds unmatched remote authors', () => {
+    writeLocal({
+      authors: [{ id: 'a1', name: 'Alice' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: [] }]
+    });
+    const remote = remoteBuffer({
+      authors: [{ id: 'a1', name: 'Alice' }, { id: 'a-pen', name: 'Pseudonym' }],
+      shelves: [{ id: 's-pen', name: 'Pen shelf', bookIds: ['book-pen'], authorId: 'a-pen' }]
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+
+    assert.equal(merged.authors.length, 2);
+    assert.ok(merged.authors.find((a) => a.name === 'Pseudonym'));
+    assert.ok(merged.shelves.find((s) => s.id === 's-pen'));
+  });
+
+  it('unions bookIds on matching shelves', () => {
+    writeLocal({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-a', 'book-b'] }]
+    });
+    const remote = remoteBuffer({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-b', 'book-c'] }]
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+    const shelf = merged.shelves.find((s) => s.id === 's1');
+    assert.deepEqual(shelf.bookIds, ['book-a', 'book-b', 'book-c']);
+  });
+
+  it('does not duplicate bookIds', () => {
+    writeLocal({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-a'] }]
+    });
+    const remote = remoteBuffer({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-a'] }]
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+    const shelf = merged.shelves.find((s) => s.id === 's1');
+    assert.equal(shelf.bookIds.filter((b) => b === 'book-a').length, 1);
+  });
+
+  it('strips DEVICE_LOOK keys from remote, preserves local', () => {
+    writeLocal({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [],
+      pageTheme: 'night',
+      uiZoom: 1.5
+    });
+    const remote = remoteBuffer({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [],
+      pageTheme: 'light',
+      uiZoom: 2,
+      typewriter: true
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+    assert.equal(merged.pageTheme, 'night');
+    assert.equal(merged.uiZoom, 1.5);
+    // typewriter was not in local, so it should NOT appear (it's device-specific)
+    assert.equal(merged.typewriter, undefined);
+  });
+
+  it('picks up unshelved book folders from disk', () => {
+    makeBook('book-orphan');
+    writeLocal({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-existing'] }]
+    });
+    const remote = remoteBuffer({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-existing'] }]
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+    const shelf = merged.shelves.find((s) => s.id === 's1');
+    assert.ok(shelf.bookIds.includes('book-orphan'), 'orphan book should be shelved');
+  });
+
+  it('sets firstRunDone to true when remote has it', () => {
+    writeLocal({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [],
+      firstRunDone: false
+    });
+    const remote = remoteBuffer({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [],
+      firstRunDone: true
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+    assert.equal(merged.firstRunDone, true);
+  });
+
+  it('unions customWords from both sides', () => {
+    writeLocal({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [],
+      customWords: ['Kvothe', 'Denna']
+    });
+    const remote = remoteBuffer({
+      authors: [{ id: 'a1', name: 'X' }],
+      shelves: [],
+      customWords: ['Denna', 'Auri']
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+    assert.ok(merged.customWords.includes('Kvothe'));
+    assert.ok(merged.customWords.includes('Denna'));
+    assert.ok(merged.customWords.includes('Auri'));
+    assert.equal(merged.customWords.length, 3);
+  });
+
+  it('handles missing local library.json gracefully', () => {
+    // No local file exists
+    makeBook('book-remote-only');
+    const remote = remoteBuffer({
+      authors: [{ id: 'a-remote', name: 'Writer' }],
+      shelves: [{ id: 's1', name: 'WIP', bookIds: ['book-remote-only'], authorId: 'a-remote' }],
+      firstRunDone: true
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+    assert.ok(merged.authors.find((a) => a.name === 'Writer'));
+    assert.ok(merged.shelves.find((s) => s.bookIds.includes('book-remote-only')));
+    assert.equal(merged.firstRunDone, true);
+  });
+
+  it('handles empty local library.json (fresh device)', () => {
+    writeLocal({});
+    makeBook('book-synced');
+    const remote = remoteBuffer({
+      authors: [{ id: 'a1', name: 'Alice' }],
+      shelves: [{ id: 's1', name: 'Works in Progress', bookIds: ['book-synced'] }],
+      firstRunDone: true,
+      authorName: 'Alice'
+    });
+    const merged = Engine.mergeLibraryJson(libPath, remote, libDir);
+    assert.equal(merged.authors.length, 1);
+    assert.equal(merged.authors[0].name, 'Alice');
+    assert.ok(merged.shelves[0].bookIds.includes('book-synced'));
+    assert.equal(merged.firstRunDone, true);
+    assert.equal(merged.authorName, 'Alice');
+  });
+});

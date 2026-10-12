@@ -310,10 +310,14 @@ async function syncPull() {
             return;
           }
 
-          // Write atomically
-          const dir = path.dirname(abs);
-          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-          writeFileDurable(abs, plaintext);
+          // library.json gets merged, not overwritten
+          if (rel === 'library.json') {
+            mergeLibraryJson(abs, plaintext, _libraryDir);
+          } else {
+            const dir = path.dirname(abs);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            writeFileDurable(abs, plaintext);
+          }
 
           State.markSynced(state, objectId, rel, hash, remote.objectVersion);
           downloaded++;
@@ -474,6 +478,153 @@ function bookIdFromPath(rel) {
 }
 
 // ---------------------------------------------------------------------------
+// library.json merge — intelligent merge instead of flat overwrite
+// ---------------------------------------------------------------------------
+
+// Per-device keys that must never be overwritten by a remote library.json
+// (matches DEVICE_LOOK in app.js)
+const DEVICE_LOOK = [
+  'pageTheme', 'uiBright', 'uiBrightAside', 'uiZoom', 'editorFontSize',
+  'typewriter', 'focus', 'posMode', 'outlineView', 'vimKeys'
+];
+
+function listBookFoldersOnDisk(libraryDir) {
+  const ids = [];
+  try {
+    for (const d of fs.readdirSync(libraryDir)) {
+      if (d.startsWith('book-') && fs.existsSync(path.join(libraryDir, d, 'chapters'))) {
+        ids.push(d);
+      }
+    }
+  } catch { /* empty library */ }
+  return ids;
+}
+
+function mergeLibraryJson(absPath, remoteBuffer, libraryDir) {
+  let local;
+  try { local = JSON.parse(fs.readFileSync(absPath, 'utf8')); } catch { local = {}; }
+  let remote;
+  try { remote = JSON.parse(remoteBuffer.toString('utf8')); } catch { remote = {}; }
+
+  // Preserve local device-specific keys; strip them from remote
+  const deviceSnapshot = {};
+  for (const k of DEVICE_LOOK) {
+    if (local[k] !== undefined) deviceSnapshot[k] = local[k];
+    delete remote[k];
+  }
+
+  // --- Authors ---
+  const localAuthors = Array.isArray(local.authors) && local.authors.length
+    ? local.authors
+    : [{ id: 'a1', name: local.authorName || 'Anonymous' }];
+  const remoteAuthors = Array.isArray(remote.authors) && remote.authors.length
+    ? remote.authors
+    : [{ id: 'a1', name: remote.authorName || 'Anonymous' }];
+
+  // Build a map: remote author id -> local author id (when names match)
+  const authorIdMap = {};
+  const localHadAuthors = Array.isArray(local.authors) && local.authors.length > 0;
+  const mergedAuthors = [...localAuthors];
+
+  for (const ra of remoteAuthors) {
+    const raName = (ra.name || '').trim().toLowerCase();
+    // First try exact ID match
+    const byId = mergedAuthors.find((a) => a.id === ra.id);
+    if (byId) {
+      // If the local author was a synthetic fallback, adopt the remote name
+      if (!localHadAuthors && byId.name === 'Anonymous' && ra.name) {
+        byId.name = ra.name;
+      }
+      authorIdMap[ra.id] = byId.id;
+      continue;
+    }
+    // Then try name match (case-insensitive)
+    const byName = mergedAuthors.find((a) => (a.name || '').trim().toLowerCase() === raName);
+    if (byName) {
+      authorIdMap[ra.id] = byName.id;
+      continue;
+    }
+    // No match — add this author
+    mergedAuthors.push({ ...ra });
+    authorIdMap[ra.id] = ra.id;
+  }
+
+  // --- Shelves ---
+  const localShelves = Array.isArray(local.shelves) ? local.shelves : [];
+  const remoteShelves = Array.isArray(remote.shelves) ? remote.shelves : [];
+  const mergedShelves = localShelves.map((s) => ({ ...s, bookIds: [...(s.bookIds || [])] }));
+
+  for (const rs of remoteShelves) {
+    // Remap authorId through the author merge map
+    const mappedAuthorId = rs.authorId ? (authorIdMap[rs.authorId] || rs.authorId) : undefined;
+
+    const existing = mergedShelves.find((s) => s.id === rs.id);
+    if (existing) {
+      // Union bookIds: add remote books not already present
+      for (const bid of (rs.bookIds || [])) {
+        if (!existing.bookIds.includes(bid)) existing.bookIds.push(bid);
+      }
+      // Adopt binding info from remote if local doesn't have it
+      if (rs.binding && !existing.binding) existing.binding = rs.binding;
+    } else {
+      // Shelf exists only on remote — add it with remapped authorId
+      mergedShelves.push({
+        ...rs,
+        bookIds: [...(rs.bookIds || [])],
+        ...(mappedAuthorId ? { authorId: mappedAuthorId } : {})
+      });
+    }
+  }
+
+  // --- Safety net: any book folder on disk not on any shelf gets shelved ---
+  const allOnDisk = listBookFoldersOnDisk(libraryDir || _libraryDir);
+  const shelvedSet = new Set(mergedShelves.flatMap((s) => s.bookIds || []));
+  const unshelved = allOnDisk.filter((id) => !shelvedSet.has(id));
+
+  if (unshelved.length > 0) {
+    // Put unshelved books on the first shelf (of the first author if available)
+    const target = mergedShelves[0];
+    if (target) {
+      for (const id of unshelved) target.bookIds.push(id);
+    }
+  }
+
+  // --- Merge scalar / non-device keys ---
+  const merged = { ...local };
+
+  // Remote wins for these metadata keys if they carry information
+  if (remote.authorName && !local.authorName) merged.authorName = remote.authorName;
+  if (remote.firstRunDone) merged.firstRunDone = true;
+  if (remote.spellLanguage && !local.spellLanguage) merged.spellLanguage = remote.spellLanguage;
+  if (remote.writingStyle && !local.writingStyle) merged.writingStyle = remote.writingStyle;
+  if (remote.currentAuthorId && !local.currentAuthorId) {
+    merged.currentAuthorId = authorIdMap[remote.currentAuthorId] || remote.currentAuthorId;
+  }
+
+  // Union customWords
+  if (Array.isArray(remote.customWords) || Array.isArray(local.customWords)) {
+    const words = new Set([...(local.customWords || []), ...(remote.customWords || [])]);
+    merged.customWords = [...words];
+  }
+
+  // Union tabDefaults
+  if (remote.tabDefaults && !local.tabDefaults) merged.tabDefaults = remote.tabDefaults;
+
+  merged.authors = mergedAuthors;
+  merged.shelves = mergedShelves;
+
+  // Restore device-specific keys
+  for (const k of DEVICE_LOOK) {
+    if (deviceSnapshot[k] !== undefined) merged[k] = deviceSnapshot[k];
+    else delete merged[k];
+  }
+
+  // Write atomically
+  writeFileDurable(absPath, JSON.stringify(merged, null, 2));
+  return merged;
+}
+
+// ---------------------------------------------------------------------------
 // Status query (for IPC)
 // ---------------------------------------------------------------------------
 
@@ -513,5 +664,8 @@ module.exports = {
   // Helpers (for testing)
   enumerateLibrary,
   shouldSync,
-  bookIdFromPath
+  bookIdFromPath,
+  mergeLibraryJson,
+  listBookFoldersOnDisk,
+  DEVICE_LOOK
 };
