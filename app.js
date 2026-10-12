@@ -16202,11 +16202,11 @@ async function showSyncStatus() {
           toast(t('Sync complete'));
           if (book) refreshFromDisk();
         } else {
-          toast(r && r.error ? r.error : t('Sync failed'));
+          toast(r && r.error ? r.error : t('Sync failed'), 8000);
         }
       } catch (err) {
         bg.remove();
-        toast(t('Sync failed'));
+        toast((err && err.message) || t('Sync failed'), 8000);
         window.neo.logError('syncNow dialog: ' + (err && err.message || err));
       }
     };
@@ -16343,13 +16343,20 @@ window.neo.onMenu(async (msg) => {
           }
         }
         const r = await window.neo.syncNow();
-        updateSyncIndicator(r.error ? 'error' : 'synced', r.error || '');
-        if (!r.error) {
+        // Defer the final indicator update: engine status() messages sent
+        // via webContents.send during syncAll can arrive at the renderer
+        // after the IPC response, overriding the indicator.  A short
+        // setTimeout ensures our final state wins.
+        setTimeout(() => updateSyncIndicator(r.error ? 'error' : 'synced', r.error || ''), 120);
+        if (r.error) {
+          toast(r.error, 8000);
+        } else {
           toast(t('Sync complete'));
           if (book) refreshFromDisk();
         }
       } catch (err) {
-        updateSyncIndicator('error', err && err.message || '');
+        setTimeout(() => updateSyncIndicator('error', err && err.message || ''), 120);
+        toast((err && err.message) || t('Sync failed'), 8000);
         window.neo.logError('syncNow menu: ' + (err && err.message || err));
       }
     })();

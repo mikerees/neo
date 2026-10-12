@@ -529,6 +529,9 @@ async function fetchRemoteManifest(mfk) {
     return Manifest.decryptManifestVersioned(blob, mfk);
   } catch (err) {
     if (_logError) _logError('sync manifest fetch', err);
+    // Auth errors must propagate so the user is told to sign in again
+    // rather than seeing a silent "Sync complete" with nothing pushed.
+    if (err && /sign-in expired|Not signed in/i.test(err.message)) throw err;
     return null;
   }
 }
