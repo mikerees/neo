@@ -218,6 +218,32 @@ async function syncPush() {
             }
           }
 
+          // book.json: don't push a hollow rebuild over a real remote
+          if (rel.endsWith('/book.json') && isHollowBookMeta(abs)) {
+            const remoteEntry = Manifest.findByPath(manifest, rel);
+            if (remoteEntry) {
+              try {
+                const remotePlaintext = await downloadAndDecrypt(
+                  remoteEntry.objectId, remoteEntry.objectVersion, ck
+                );
+                if (remotePlaintext) {
+                  let remoteMeta;
+                  try { remoteMeta = JSON.parse(remotePlaintext.toString('utf8')); } catch { /* */ }
+                  if (remoteMeta && remoteMeta.title && remoteMeta.title !== 'Untitled') {
+                    // Remote has real content — adopt it instead of pushing the rebuild
+                    writeFileDurable(abs, remotePlaintext);
+                    const remoteHash = SC.contentHash(remotePlaintext);
+                    State.markSynced(state, SC.deriveObjectId(fk, rel), rel,
+                      remoteHash, remoteEntry.objectVersion);
+                    return; // skip pushing
+                  }
+                }
+              } catch (_err) {
+                if (_logError) _logError('sync push book.json guard', _err);
+              }
+            }
+          }
+
           const data = fs.readFileSync(abs);
           const hash = SC.contentHash(data);
           const objectId = SC.deriveObjectId(fk, rel);
@@ -400,6 +426,11 @@ async function syncPull() {
     // Safety net: remap orphaned shelf authorIds and shelve any book folder
     // on disk that isn't on a shelf yet.
     if (ensureBooksAreShelved(_libraryDir)) downloaded++;
+
+    // Reconcile book.json files: if the app rebuilt a default book.json
+    // (Untitled / Anonymous) because of a race with the sync, re-download
+    // the real version from the manifest.
+    downloaded += await reconcileBookMeta(manifest, ck, state, _libraryDir);
 
     state.lastSyncAt = new Date().toISOString();
     state.lastManifestVersion = manifest.manifestVersion;
@@ -600,6 +631,63 @@ function ensureBooksAreShelved(libraryDir) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// book.json reconciliation — detect hollow rebuilds and re-download
+// ---------------------------------------------------------------------------
+
+// A book.json written by rebuildBookMeta has title 'Untitled' (or its
+// translation) and author 'Anonymous'. When the manifest holds a version
+// with a real title, the remote wins — the rebuild was caused by a race
+// between sync and the running app.
+function isHollowBookMeta(absPath) {
+  try {
+    const meta = JSON.parse(fs.readFileSync(absPath, 'utf8'));
+    if (!meta || typeof meta !== 'object') return true;
+    const title = (meta.title || '').trim();
+    const author = (meta.author || '').trim();
+    if (!title || title === 'Untitled') return true;
+    if (!author || author === 'Anonymous') return true;
+    return false;
+  } catch { return true; }
+}
+
+async function reconcileBookMeta(manifest, ck, state, libraryDir) {
+  const bookDirs = listBookFoldersOnDisk(libraryDir);
+  let fixed = 0;
+  for (const bookDir of bookDirs) {
+    const rel = bookDir + '/book.json';
+    const abs = path.join(libraryDir, bookDir, 'book.json');
+
+    if (!isHollowBookMeta(abs)) continue;
+
+    const entry = Manifest.findByPath(manifest, rel);
+    if (!entry) continue;
+
+    try {
+      const remotePlaintext = await downloadAndDecrypt(
+        entry.objectId, entry.objectVersion, ck
+      );
+      if (!remotePlaintext) continue;
+
+      // Only overwrite if remote actually has a real title
+      let remoteMeta;
+      try { remoteMeta = JSON.parse(remotePlaintext.toString('utf8')); } catch { continue; }
+      if (!remoteMeta || !remoteMeta.title || remoteMeta.title === 'Untitled') continue;
+
+      const dir = path.dirname(abs);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      writeFileDurable(abs, remotePlaintext);
+
+      const hash = SC.contentHash(remotePlaintext);
+      State.markSynced(state, entry.objectId, rel, hash, entry.objectVersion);
+      fixed++;
+    } catch (err) {
+      if (_logError) _logError('sync reconcile book.json', err);
+    }
+  }
+  return fixed;
+}
+
 function mergeLibraryJson(absPath, remoteBuffer, libraryDir) {
   let local;
   try { local = JSON.parse(fs.readFileSync(absPath, 'utf8')); } catch { local = {}; }
@@ -767,6 +855,8 @@ module.exports = {
   bookIdFromPath,
   mergeLibraryJson,
   ensureBooksAreShelved,
+  isHollowBookMeta,
+  reconcileBookMeta,
   listBookFoldersOnDisk,
   DEVICE_LOOK
 };

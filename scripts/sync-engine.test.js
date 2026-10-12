@@ -897,3 +897,63 @@ describe('ensureBooksAreShelved', () => {
     assert.equal(changed, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// isHollowBookMeta — detect default rebuilds
+// ---------------------------------------------------------------------------
+
+describe('isHollowBookMeta', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'neo-hollow-'));
+  });
+
+  function writeBookJson(name, obj) {
+    const p = path.join(tmpDir, name);
+    fs.writeFileSync(p, JSON.stringify(obj, null, 2));
+    return p;
+  }
+
+  it('returns true for a rebuilt book.json (Untitled / Anonymous)', () => {
+    const p = writeBookJson('book.json', {
+      id: 'book-test', title: 'Untitled', author: 'Anonymous',
+      chapterOrder: ['ch-1']
+    });
+    assert.equal(Engine.isHollowBookMeta(p), true);
+  });
+
+  it('returns true when title is empty', () => {
+    const p = writeBookJson('book.json', {
+      id: 'book-test', title: '', author: 'Alice',
+      chapterOrder: ['ch-1']
+    });
+    assert.equal(Engine.isHollowBookMeta(p), true);
+  });
+
+  it('returns true when author is empty', () => {
+    const p = writeBookJson('book.json', {
+      id: 'book-test', title: 'My Novel', author: '',
+      chapterOrder: ['ch-1']
+    });
+    assert.equal(Engine.isHollowBookMeta(p), true);
+  });
+
+  it('returns false for a real book.json with title and author', () => {
+    const p = writeBookJson('book.json', {
+      id: 'book-test', title: 'My Novel', author: 'Alice',
+      chapterOrder: ['ch-1', 'ch-2']
+    });
+    assert.equal(Engine.isHollowBookMeta(p), false);
+  });
+
+  it('returns true when file does not exist', () => {
+    assert.equal(Engine.isHollowBookMeta(path.join(tmpDir, 'nope.json')), true);
+  });
+
+  it('returns true for invalid JSON', () => {
+    const p = path.join(tmpDir, 'bad.json');
+    fs.writeFileSync(p, 'not json');
+    assert.equal(Engine.isHollowBookMeta(p), true);
+  });
+});
