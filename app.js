@@ -16295,6 +16295,7 @@ window.neo.onMenu(async (msg) => {
   if (msg.type === 'syncConnect') showSyncConnect();
   if (msg.type === 'syncNow') {
     updateSyncIndicator('syncing');
+    if (book) flushAllSaves();
     window.neo.syncNow().then((r) => {
       updateSyncIndicator(r.error ? 'error' : 'synced', r.error || '');
       if (!r.error) toast(t('Sync complete'));

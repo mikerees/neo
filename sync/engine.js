@@ -176,6 +176,15 @@ function enqueueSync(relativePath) {
   }, PUSH_DEBOUNCE_MS);
 }
 
+// Cancel any pending debounce and push immediately — called before syncAll
+// so that a manual "Sync Now" includes everything enqueued up to this moment.
+function flushPushDebounce() {
+  if (_pushDebounce) {
+    clearTimeout(_pushDebounce);
+    _pushDebounce = null;
+  }
+}
+
 async function syncPush() {
   if (!isReady() || _syncInProgress || _pushQueue.size === 0) return;
   _syncInProgress = true;
@@ -448,8 +457,12 @@ async function syncPull() {
   }
 }
 
-// Full sync: pull then push
+// Full sync: push local changes first so the other device sees them,
+// then pull remote changes, then push again for anything the pull changed
+// (e.g. a merged library.json).
 async function syncAll() {
+  flushPushDebounce();
+  await syncPush();
   const pullResult = await syncPull();
   await syncPush();
   return pullResult;

@@ -168,6 +168,9 @@ function register({ libraryDir, appRoot, sendToWindow, logError, readSecret, wri
   ipcMain.handle('sync:now', async () => {
     try {
       if (!Engine.isReady()) return { error: 'Sync is not set up' };
+      // Let pending chapter:write IPC messages from a flushAllSaves() in
+      // the renderer be handled before we start the sync.
+      await new Promise((resolve) => setImmediate(resolve));
       const result = await Engine.syncAll();
       return { ok: true, ...result };
     } catch (err) {
